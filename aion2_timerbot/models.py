@@ -54,3 +54,30 @@ class GuildPreset:
     aliases: tuple[str, ...] = ()
     note: str | None = None
     created_by: int | None = None
+
+
+@dataclass(slots=True)
+class EventBoard:
+    """A channel's "next up" message, refreshed as the window rolls forward."""
+
+    guild_id: int
+    channel_id: int
+    message_id: int | None
+    hours: float
+    refresh_at: float
+    created_by: int
+    created_at: float
+
+
+@dataclass(slots=True)
+class EventReminder:
+    """An opt-in warning before one scheduled event starts."""
+
+    guild_id: int
+    event_id: str
+    minutes_before: int
+    channel_id: int
+    mention: str | None
+    last_fired_at: float | None
+    created_by: int
+    created_at: float

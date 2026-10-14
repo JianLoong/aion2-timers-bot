@@ -5,6 +5,7 @@ __pycache__/
 .env
 data/*.db
 data/*.db-journal
+data/schedule-cache.json
 *.db
 *.db-journal
 .docker*

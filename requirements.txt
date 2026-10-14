@@ -1,3 +1,5 @@
 discord.py>=2.6,<3
 aiosqlite>=0.19
 python-dotenv>=1.0
+# zoneinfo needs this on Windows and on slim container images, which ship no tz database
+tzdata>=2024.1

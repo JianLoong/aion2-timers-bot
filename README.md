@@ -9,6 +9,9 @@ world bosses, rifts, sieges, daily and weekly resets.
 - `/timer cancel` — stop one
 - `/timer preset list|start|add|remove` — save recurring spawn intervals so starting a boss
   timer is one command instead of typing a duration
+- `/timer board` — a live "next up" board of the scheduled events (rifts, invasions, sieges,
+  bosses, resets), with countdowns rendered in each member's own timezone
+- `/timer reminder set|off|list` — an opt-in warning a few minutes before an event starts
 
 Timers live in a SQLite file, so they survive restarts. A timer that was due while the bot
 was offline still fires, once, and says how late it was — it does not replay every missed cycle.
@@ -128,6 +131,53 @@ Save your own presets per server, e.g.
 Server presets show as `(server)` in autocomplete and can be deleted in Discord; built-in ones
 are edited in the preset file.
 
+### `/timer board [channel] [hours] [remove]` (Manage Channels)
+
+Posts one message and keeps editing it: the next few times of every scheduled event, soonest
+first, using Discord relative timestamps that count down for each reader. It re-renders itself
+as events pass and the window rolls forward, so it never goes stale. `hours` is 12, 24
+(default) or 48; `remove:True` deletes the board and its message.
+
+### `/timer reminder set event [minutes] [channel] [ping]`, `/timer reminder off event`, `/timer reminder list` (Manage Channels)
+
+Opt-in warnings before a single event; `minutes` is 0, 2, 5 (default), 10 or 15. Nothing pings
+unless you set a reminder — which matters, because the schedule has hourly events. Each
+occurrence is announced once, and a restart will not repeat one.
+
+## The event schedule
+
+`/timer board` covers the content that runs on a **clock** — rifts, invasions, sieges, field
+bosses, resets — rather than the countdowns you type into `/timer set`.
+
+**Where the times come from.** They are fetched from the community schedule at
+`https://shugo.gg/timers.json` (the data behind shugo.gg/timers), cached next to the database and
+re-fetched every `SCHEDULE_TTL_HOURS`. If a fetch fails the cached copy is used and the board
+says so on a ⚠️ line; with no cache either it says it has no data. Set `SCHEDULE_URL=` (empty) to
+never fetch, running from the cache and your own file only.
+
+**Community data, not official.** That file says it itself: NCSOFT never published the Global
+event times. Expect some times to be wrong for your server — that is what the override file is
+for.
+
+**Your own times.** Copy `schedules.example.json` to `data/schedules.json` (or point
+`SCHEDULES_FILE` elsewhere) and edit it:
+
+- an entry with an existing `id` patches that event — any of `name`, `icon`, `kind`,
+  `description`, `durationMinutes`, `schedules`
+- a new `id` (with a `name` and a `schedule`) adds an event of your own
+- `"remove": true` drops one from the board
+- a single `schedule` entry follows whichever region you are set up for; use
+  `schedules: {"<region>": ...}` only when you need to name one
+- with no network at all, add `region`, `regionLabel` and `timeZone` at the top level and the
+  file alone is enough
+
+Edits are picked up on the next board refresh — no restart needed.
+
+**Which clock.** `SCHEDULE_REGION` picks it (`global-as` by default, the Korea/Japan clock the
+upstream site also defaults to; also `global-nae`, `global-naw`, `global-eu`, `global-sa`, `kr`,
+`tw`). Display needs no setting: the board uses Discord timestamps, so every member reads the
+times in their own timezone.
+
 ## Presets
 
 `aion2_timerbot/data/presets.json` ships starter presets. **The intervals in it are examples,
@@ -155,6 +205,10 @@ All in `.env` (see `.env.example`):
 | `DB_PATH` | `data/timers.db` | Where timers are stored. |
 | `DEV_GUILD_ID` | — | Sync commands to one guild instantly. |
 | `PRESETS_FILE` | bundled file | Alternative preset file. |
+| `SCHEDULE_REGION` | `global-as` | Which server clock the event schedule follows. |
+| `SCHEDULE_URL` | shugo.gg/timers.json | Where the schedule is fetched from; empty disables fetching. |
+| `SCHEDULE_TTL_HOURS` | `6` | How long a fetched schedule is trusted before re-fetching. |
+| `SCHEDULES_FILE` | `data/schedules.json` | Your schedule overrides, next to the database. |
 | `TICK_SECONDS` | `5` | How often due timers are checked. |
 | `MISSED_AFTER_SECONDS` | `120` | A timer later than this says it fired late. |
 | `MAX_TIMERS_PER_GUILD` | `100` | Cap per server. |
@@ -178,17 +232,20 @@ The suite runs offline, with no token and no gateway connection: the command lay
 through fake Discord objects (`tests/conftest.py`).
 
 ```
-bot.py                        entrypoint: config, store, presets, command sync
+bot.py                        entrypoint: config, store, presets, schedule source, sync
 docker-compose.yml            one-command start (see "Run with Docker")
 Dockerfile                    image: python:3.14-slim, non-root, timers in /app/data
+schedules.example.json        example event-schedule override (copy to data/schedules.json)
 aion2_timerbot/
   duration.py                 "2h30m" parsing and formatting
-  models.py                   Timer, GuildPreset
-  db.py                       SQLite store (timers, per-guild presets)
+  models.py                   Timer, GuildPreset, EventBoard, EventReminder
+  db.py                       SQLite store (timers, presets, boards, reminders)
   scheduler.py                polls for due timers, advances repeating ones
   presets.py                  preset library, built-ins merged with per-guild ones
+  schedule.py                 event schedule model, override merge, next-occurrence maths
+  schedule_source.py          fetch + cache + override file for the schedule
   config.py                   environment configuration
   data/presets.json           starter presets (edit these)
-  cogs/timers.py              the slash commands and the alerts
+  cogs/timers.py              the slash commands, the board, the alerts
 tests/                        pytest suite
 ```

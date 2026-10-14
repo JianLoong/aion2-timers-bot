@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import discord
 import pytest
 from discord import app_commands
 
-from aion2_timerbot.cogs.timers import UserError
+from aion2_timerbot.cogs.timers import TimerCog, UserError
 from aion2_timerbot.config import Config
 from aion2_timerbot.db import Store
 from aion2_timerbot.presets import BUILTIN_PATH, load_library
+from aion2_timerbot.schedule_source import ScheduleSource
 from bot import Aion2TimerBot
 from tests.conftest import (
     FakeChannel,
@@ -94,7 +97,10 @@ async def test_the_setup_entry_point_registers_the_cog(tmp_path):
     store = Store(tmp_path / "extension.db")
     await store.open()
     player = Aion2TimerBot(
-        Config(token="test-token", db_path=store.path), store, load_library(BUILTIN_PATH)
+        Config(token="test-token", db_path=store.path),
+        store,
+        load_library(BUILTIN_PATH),
+        ScheduleSource(region="global-as", url=""),
     )
     await player.load_extension("aion2_timerbot.cogs.timers")
     try:
@@ -585,3 +591,382 @@ async def test_missing_permissions_are_explained(bot):
     assert missing.manage_guild  # the fixture provides the permission the error denies
     await cog.cog_app_command_error(interaction, app_commands.MissingPermissions(["manage_guild"]))
     assert "permission" in interaction.response.last["content"].lower()
+
+
+# ------------------------------------------------------------- /timer board
+
+KST = ZoneInfo("Asia/Seoul")
+
+
+def _at(year: int, month: int, day: int, hour: int, minute: int = 0) -> float:
+    return datetime(year, month, day, hour, minute, tzinfo=KST).timestamp()
+
+
+def _staff(bot) -> FakeInteraction:
+    """An interaction from someone who may manage channels, in a channel we can post to."""
+    return FakeInteraction(user=FakeUser(1, permissions=MANAGE_CHANNELS))
+
+
+def _board_channel(bot, monkeypatch, channel_id: int = 700):
+    """One channel object, used both as the interaction's channel and by the bot's lookup.
+
+    Two fakes with the same id would hide the fact that posting and fetching messages need
+    to hit the same object.
+    """
+    channel = FakeChannel(channel_id)
+    monkeypatch.setattr(bot, "get_channel", lambda cid: channel if cid == channel_id else None)
+    interaction = FakeInteraction(
+        channel=channel, user=FakeUser(1, permissions=MANAGE_CHANNELS)
+    )
+    return channel, interaction
+
+
+async def _next_start(cog, event_id: str, now: float):
+    schedule = await cog.source.get()
+    event = schedule.find(event_id)
+    return schedule.next_occurrence(event, now=now)
+
+
+async def test_board_posts_a_live_embed(bot, monkeypatch):
+    cog = _cog(bot)
+    channel, interaction = _board_channel(bot, monkeypatch)
+
+    await _invoke(cog, "timer_board", interaction)
+
+    board = await cog.store.get_event_board(interaction.guild.id, 700)
+    assert board is not None
+    assert board.message_id is not None
+    assert board.refresh_at > time.time()  # scheduled, not left due
+
+    embed = channel.messages[board.message_id].embed
+    assert "Hourly Boss" in embed.description
+    assert "Weekly Siege" in embed.description
+    assert embed.description.count("<t:") >= 3  # live countdowns Discord renders per viewer
+    assert "Asia/Seoul" in embed.footer.text
+    assert "next 24h" in embed.title
+    assert interaction.response.last["ephemeral"] is True
+
+
+async def test_board_needs_manage_channels(bot):
+    cog = _cog(bot)
+    interaction = FakeInteraction()
+
+    message = await _expect_user_error(cog, interaction, "timer_board")
+
+    assert "Manage Channels" in message
+    assert await cog.store.list_event_boards(interaction.guild.id) == []
+
+
+async def test_board_reports_a_channel_it_cannot_post_in(bot, monkeypatch):
+    cog = _cog(bot)
+    monkeypatch.setattr(bot, "get_channel", lambda channel_id: None)
+
+    async def gone(channel_id):
+        raise discord.NotFound(FakeHTTPResponse(404, "Not Found"), "unknown channel")
+
+    monkeypatch.setattr(bot, "fetch_channel", gone)
+    interaction = FakeInteraction(user=FakeUser(1, permissions=MANAGE_CHANNELS))
+
+    message = await _expect_user_error(cog, interaction, "timer_board")
+
+    assert "reach" in message or "post" in message
+
+
+async def test_board_shows_a_schedule_problem_to_the_reader(bot, monkeypatch):
+    cog = _cog(bot)
+    channel, interaction = _board_channel(bot, monkeypatch)
+    cog.source.last_error = "could not fetch https://shugo.gg/timers.json: dns is down"
+
+    await _invoke(cog, "timer_board", interaction)
+
+    board = await cog.store.get_event_board(interaction.guild.id, 700)
+    embed = channel.messages[board.message_id].embed
+    assert "⚠️" in embed.description
+    assert "dns is down" in embed.description
+
+
+async def test_re_running_board_edits_the_same_message(bot, monkeypatch):
+    cog = _cog(bot)
+    channel, interaction = _board_channel(bot, monkeypatch)
+
+    await _invoke(cog, "timer_board", interaction)
+    first = await cog.store.get_event_board(interaction.guild.id, 700)
+
+    await _invoke(cog, "timer_board", interaction, hours=12)
+
+    board = await cog.store.get_event_board(interaction.guild.id, 700)
+    assert board.message_id == first.message_id
+    assert board.hours == 12
+    assert len(channel.messages) == 1  # one board message, never a second
+    assert len(channel.messages[board.message_id].edits) >= 1
+    assert "next 12h" in channel.messages[board.message_id].embed.title
+
+
+async def test_board_remove_deletes_the_message(bot, monkeypatch):
+    cog = _cog(bot)
+    channel, interaction = _board_channel(bot, monkeypatch)
+    await _invoke(cog, "timer_board", interaction)
+    board = await cog.store.get_event_board(interaction.guild.id, 700)
+
+    await _invoke(cog, "timer_board", interaction, remove=True)
+
+    assert await cog.store.get_event_board(interaction.guild.id, 700) is None
+    assert channel.messages[board.message_id].deleted is True
+
+
+async def test_removing_a_board_that_is_not_there_is_explained(bot):
+    cog = _cog(bot)
+    interaction = FakeInteraction(user=FakeUser(1, permissions=MANAGE_CHANNELS))
+
+    message = await _expect_user_error(cog, interaction, "timer_board", remove=True)
+
+    assert "no board" in message.lower()
+
+
+async def test_the_tick_refreshes_a_due_board(bot, monkeypatch):
+    cog = _cog(bot)
+    channel, interaction = _board_channel(bot, monkeypatch)
+    await _invoke(cog, "timer_board", interaction)
+    board = await cog.store.get_event_board(interaction.guild.id, 700)
+    edits_before = len(channel.messages[board.message_id].edits)
+
+    # make it due, as it would be once its earliest event has started
+    await cog.store.set_event_board_message(
+        interaction.guild.id, 700, message_id=board.message_id, refresh_at=0.0
+    )
+    await cog._tick_events(now=time.time())
+
+    assert len(channel.messages[board.message_id].edits) > edits_before
+    refreshed = await cog.store.get_event_board(interaction.guild.id, 700)
+    assert refreshed.refresh_at > time.time()
+
+
+async def test_a_board_is_not_posted_twice_when_the_tick_and_a_command_race(bot, monkeypatch):
+    """The tick and /timer board both render; only one message may come out of it."""
+    cog = _cog(bot)
+    channel, interaction = _board_channel(bot, monkeypatch)
+
+    await _invoke(cog, "timer_board", interaction)
+    await cog._tick_events(now=time.time())  # the background tick, right after
+
+    assert len(channel.messages) == 1
+    board = await cog.store.get_event_board(interaction.guild.id, 700)
+    assert board.message_id in channel.messages
+
+
+async def test_a_board_whose_channel_vanished_is_backed_off(bot, monkeypatch):
+    cog = _cog(bot)
+    monkeypatch.setattr(bot, "get_channel", lambda channel_id: None)
+
+    async def gone(channel_id):
+        raise discord.NotFound(FakeHTTPResponse(404, "Not Found"), "unknown channel")
+
+    monkeypatch.setattr(bot, "fetch_channel", gone)
+    interaction = FakeInteraction(user=FakeUser(1, permissions=MANAGE_CHANNELS))
+    await cog.store.upsert_event_board(
+        guild_id=interaction.guild.id, channel_id=999, hours=24, created_by=1, refresh_at=0.0
+    )
+
+    await cog._tick_events(now=time.time())  # must not raise
+
+    board = await cog.store.get_event_board(interaction.guild.id, 999)
+    assert board.refresh_at > time.time()  # retried later, not every tick
+
+
+# ---------------------------------------------------------- /timer reminder
+
+
+async def test_reminder_set_and_list(bot):
+    cog = _cog(bot)
+    interaction = FakeInteraction(user=FakeUser(1, permissions=MANAGE_CHANNELS))
+
+    await _invoke(cog, "reminder_set", interaction, event="Hourly Boss", minutes=5)
+
+    reminder = await cog.store.get_event_reminder(interaction.guild.id, "hourly-boss")
+    assert reminder.minutes_before == 5
+    assert reminder.channel_id == interaction.channel.id
+    assert "5 min before" in interaction.response.last["content"]
+
+    await _invoke(cog, "reminder_list", interaction)
+    embed = interaction.response.messages[-1]["embed"]
+    assert "Hourly Boss" in embed.fields[0].name
+    assert "5 min before" in embed.fields[0].value
+
+
+async def test_reminder_set_needs_manage_channels(bot):
+    cog = _cog(bot)
+    interaction = FakeInteraction()
+
+    message = await _expect_user_error(cog, interaction, "reminder_set", event="Hourly Boss")
+
+    assert "Manage Channels" in message
+    assert await cog.store.list_event_reminders(interaction.guild.id) == []
+
+
+async def test_reminder_set_names_the_events_it_knows(bot):
+    cog = _cog(bot)
+    interaction = FakeInteraction(user=FakeUser(1, permissions=MANAGE_CHANNELS))
+
+    message = await _expect_user_error(cog, interaction, "reminder_set", event="Ancient Dragon")
+
+    assert "Ancient Dragon" in message
+    assert "Hourly Boss" in message and "Weekly Siege" in message
+
+
+async def test_reminder_fires_at_the_lead_time_and_only_once(bot, monkeypatch):
+    cog = _cog(bot)
+    channel = FakeChannel(800)
+    monkeypatch.setattr(bot, "get_channel", lambda channel_id: channel)
+    interaction = FakeInteraction(channel=FakeChannel(800), user=FakeUser(1, permissions=MANAGE_CHANNELS))
+    await _invoke(cog, "reminder_set", interaction, event="Hourly Boss", minutes=5, ping="here")
+
+    now = _at(2026, 10, 14, 12, 0)
+    occurrence = await _next_start(cog, "hourly-boss", now)
+    lead = 5 * 60
+
+    await cog._fire_reminders(now=occurrence.start - lead - 60)  # an hour before: nothing
+    assert channel.sent == []
+
+    await cog._fire_reminders(now=occurrence.start - lead + 1)
+    assert len(channel.sent) == 1
+    sent = channel.sent[0]
+    assert sent["content"] == "@here Event starting"
+    assert "Hourly Boss" in sent["embed"].title
+    assert "Starts" in sent["embed"].description
+    assert sent["allowed_mentions"].everyone is False  # "here" is not everyone
+
+    await cog._fire_reminders(now=occurrence.start - lead + 6)  # the next tick
+    assert len(channel.sent) == 1  # not sent twice
+
+    reminder = await cog.store.get_event_reminder(interaction.guild.id, "hourly-boss")
+    assert reminder.last_fired_at == occurrence.start
+
+
+async def test_a_reminder_survives_a_restart_without_repeating(bot, monkeypatch):
+    """The dedupe lives in the database, not in the cog's memory."""
+    cog = _cog(bot)
+    channel = FakeChannel(800)
+    monkeypatch.setattr(bot, "get_channel", lambda channel_id: channel)
+    interaction = FakeInteraction(channel=FakeChannel(800), user=FakeUser(1, permissions=MANAGE_CHANNELS))
+    await _invoke(cog, "reminder_set", interaction, event="Hourly Boss", minutes=5)
+
+    now = _at(2026, 10, 14, 12, 0)
+    occurrence = await _next_start(cog, "hourly-boss", now)
+    fire_time = occurrence.start - 5 * 60 + 1
+
+    await cog._fire_reminders(now=fire_time)
+    assert len(channel.sent) == 1
+
+    restarted = TimerCog(bot)  # a fresh cog over the same database
+    await restarted._fire_reminders(now=fire_time + 2)
+
+    assert len(channel.sent) == 1
+
+
+async def test_a_reminder_for_the_next_occurrence_fires_again(bot, monkeypatch):
+    cog = _cog(bot)
+    channel = FakeChannel(800)
+    monkeypatch.setattr(bot, "get_channel", lambda channel_id: channel)
+    interaction = FakeInteraction(channel=FakeChannel(800), user=FakeUser(1, permissions=MANAGE_CHANNELS))
+    await _invoke(cog, "reminder_set", interaction, event="Hourly Boss", minutes=0)
+
+    now = _at(2026, 10, 14, 12, 0)
+    first = await _next_start(cog, "hourly-boss", now)
+
+    await cog._fire_reminders(now=first.start + 2)
+    assert len(channel.sent) == 1
+
+    # the following one, an hour later
+    await cog._fire_reminders(now=first.start + 3600 + 2)
+    assert len(channel.sent) == 2
+
+
+async def test_a_when_it_starts_reminder_is_not_skipped(bot, monkeypatch):
+    """Regression: with a 0-minute lead the occurrence lookup used to miss it entirely."""
+    cog = _cog(bot)
+    channel = FakeChannel(800)
+    monkeypatch.setattr(bot, "get_channel", lambda channel_id: channel)
+    interaction = FakeInteraction(channel=FakeChannel(800), user=FakeUser(1, permissions=MANAGE_CHANNELS))
+    await _invoke(cog, "reminder_set", interaction, event="Hourly Boss", minutes=0)
+
+    now = _at(2026, 10, 14, 12, 0)
+    occurrence = await _next_start(cog, "hourly-boss", now)
+
+    await cog._fire_reminders(now=occurrence.start + 3)
+
+    assert len(channel.sent) == 1
+
+
+async def test_a_reminder_missed_by_a_long_outage_is_dropped(bot, monkeypatch):
+    cog = _cog(bot)
+    channel = FakeChannel(800)
+    monkeypatch.setattr(bot, "get_channel", lambda channel_id: channel)
+    interaction = FakeInteraction(channel=FakeChannel(800), user=FakeUser(1, permissions=MANAGE_CHANNELS))
+    await _invoke(cog, "reminder_set", interaction, event="Hourly Boss", minutes=5)
+
+    now = _at(2026, 10, 14, 12, 0)
+    occurrence = await _next_start(cog, "hourly-boss", now)
+
+    await cog._fire_reminders(now=occurrence.start + 600)  # ten minutes after it began
+
+    assert channel.sent == []
+
+
+async def test_a_reminder_only_pings_what_it_was_told_to(bot, monkeypatch):
+    cog = _cog(bot)
+    channel = FakeChannel(800)
+    monkeypatch.setattr(bot, "get_channel", lambda channel_id: channel)
+    guild = FakeGuild(roles=[FakeRole(4242, "Officers")])
+    interaction = FakeInteraction(guild=guild, channel=FakeChannel(800), user=FakeUser(1, permissions=MANAGE_CHANNELS))
+    await _invoke(cog, "reminder_set", interaction, event="Hourly Boss", minutes=0, ping="Officers")
+
+    now = _at(2026, 10, 14, 12, 0)
+    occurrence = await _next_start(cog, "hourly-boss", now)
+    await cog._fire_reminders(now=occurrence.start + 2)
+
+    sent = channel.sent[-1]
+    assert sent["content"] == "<@&4242> Event starting"
+    assert sent["allowed_mentions"].roles is True
+    assert sent["allowed_mentions"].everyone is False
+
+
+async def test_reminder_off(bot):
+    cog = _cog(bot)
+    interaction = FakeInteraction(user=FakeUser(1, permissions=MANAGE_CHANNELS))
+    await _invoke(cog, "reminder_set", interaction, event="Hourly Boss", minutes=5)
+
+    await _invoke(cog, "reminder_off", interaction, event="hourly-boss")
+
+    assert await cog.store.list_event_reminders(interaction.guild.id) == []
+    assert "Hourly Boss" in interaction.response.last["content"]
+
+
+async def test_reminder_off_for_something_not_set_is_explained(bot):
+    cog = _cog(bot)
+    interaction = FakeInteraction(user=FakeUser(1, permissions=MANAGE_CHANNELS))
+
+    message = await _expect_user_error(cog, interaction, "reminder_off", event="Hourly Boss")
+
+    assert "No reminder" in message
+
+
+async def test_event_autocomplete_offers_the_schedule(bot):
+    cog = _cog(bot)
+    interaction = FakeInteraction()
+
+    choices = await cog.schedule_event_autocomplete(interaction, "hourly")
+
+    assert [choice.value for choice in choices] == ["Hourly Boss"]
+    assert await cog.schedule_event_autocomplete(interaction, "zzz") == []
+
+
+async def test_reminder_autocomplete_shows_what_is_on(bot):
+    cog = _cog(bot)
+    interaction = FakeInteraction(user=FakeUser(1, permissions=MANAGE_CHANNELS))
+    await _invoke(cog, "reminder_set", interaction, event="Weekly Siege", minutes=15)
+
+    choices = await cog.reminder_event_autocomplete(interaction, "")
+
+    assert [choice.value for choice in choices] == ["weekly-siege"]
+    assert "Weekly Siege" in choices[0].name
+    assert "15 min before" in choices[0].name

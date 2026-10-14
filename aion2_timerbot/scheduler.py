@@ -42,12 +42,15 @@ class TimerScheduler:
         tick_seconds: float = 5.0,
         clock: Callable[[], float] = time.time,
         batch_limit: int = 100,
+        on_tick: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.store = store
         self.on_due = on_due
         self.tick_seconds = max(1.0, float(tick_seconds))
         self.clock = clock
         self.batch_limit = batch_limit
+        # Runs after each timer batch: the bot's other periodic work (event boards, reminders).
+        self.on_tick = on_tick
         self._task: asyncio.Task[None] | None = None
 
     @property
@@ -73,6 +76,8 @@ class TimerScheduler:
         while True:
             try:
                 await self.run_once()
+                if self.on_tick is not None:
+                    await self.on_tick()
             except asyncio.CancelledError:
                 raise
             except Exception:  # a bad tick must not kill the loop

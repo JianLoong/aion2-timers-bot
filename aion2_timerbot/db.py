@@ -9,7 +9,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from .models import GuildPreset, Timer, name_key
+from .models import EventBoard, EventReminder, GuildPreset, Timer, name_key
 
 __all__ = ["DuplicateTimerError", "Store"]
 
@@ -41,6 +41,30 @@ CREATE TABLE IF NOT EXISTS guild_presets (
     note             TEXT,
     created_by       INTEGER,
     PRIMARY KEY (guild_id, name_key)
+);
+
+CREATE TABLE IF NOT EXISTS event_boards (
+    guild_id   INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    message_id INTEGER,
+    hours      REAL    NOT NULL DEFAULT 24,
+    refresh_at REAL    NOT NULL DEFAULT 0,
+    created_by INTEGER NOT NULL,
+    created_at REAL    NOT NULL,
+    PRIMARY KEY (guild_id, channel_id)
+);
+CREATE INDEX IF NOT EXISTS event_boards_refresh ON event_boards (refresh_at);
+
+CREATE TABLE IF NOT EXISTS event_reminders (
+    guild_id       INTEGER NOT NULL,
+    event_id       TEXT    NOT NULL,
+    minutes_before INTEGER NOT NULL DEFAULT 0,
+    channel_id     INTEGER NOT NULL,
+    mention        TEXT,
+    last_fired_at  REAL,
+    created_by     INTEGER NOT NULL,
+    created_at     REAL    NOT NULL,
+    PRIMARY KEY (guild_id, event_id)
 );
 """
 
@@ -265,6 +289,165 @@ class Store:
         return cursor.rowcount > 0
 
 
+    # ------------------------------------------- event boards (the next-up list)
+
+    async def upsert_event_board(
+        self,
+        *,
+        guild_id: int,
+        channel_id: int,
+        hours: float,
+        created_by: int,
+        message_id: int | None = None,
+        refresh_at: float = 0.0,
+        created_at: float | None = None,
+    ) -> EventBoard:
+        created = time.time() if created_at is None else created_at
+        async with self._lock:
+            await self.conn.execute(
+                """
+                INSERT INTO event_boards
+                    (guild_id, channel_id, message_id, hours, refresh_at, created_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (guild_id, channel_id) DO UPDATE SET
+                    hours = excluded.hours,
+                    message_id = COALESCE(excluded.message_id, event_boards.message_id),
+                    refresh_at = excluded.refresh_at
+                """,
+                (guild_id, channel_id, message_id, float(hours), float(refresh_at), created_by, created),
+            )
+            await self.conn.commit()
+
+        board = await self.get_event_board(guild_id, channel_id)
+        if board is None:  # pragma: no cover - the row was just written
+            raise RuntimeError("event board disappeared right after being written")
+        return board
+
+    async def get_event_board(self, guild_id: int, channel_id: int) -> EventBoard | None:
+        async with self.conn.execute(
+            "SELECT * FROM event_boards WHERE guild_id = ? AND channel_id = ?", (guild_id, channel_id)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return _to_event_board(row) if row is not None else None
+
+    async def list_event_boards(self, guild_id: int | None = None) -> list[EventBoard]:
+        sql = "SELECT * FROM event_boards"
+        params: tuple[int, ...] = ()
+        if guild_id is not None:
+            sql += " WHERE guild_id = ?"
+            params = (guild_id,)
+        sql += " ORDER BY guild_id, channel_id"
+        async with self.conn.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+        return [_to_event_board(row) for row in rows]
+
+    async def due_event_boards(self, now: float, *, limit: int = 50) -> list[EventBoard]:
+        """Boards whose window has rolled over and need re-rendering."""
+        async with self.conn.execute(
+            "SELECT * FROM event_boards WHERE refresh_at <= ? ORDER BY refresh_at LIMIT ?",
+            (float(now), limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [_to_event_board(row) for row in rows]
+
+    async def set_event_board_message(
+        self, guild_id: int, channel_id: int, *, message_id: int, refresh_at: float
+    ) -> None:
+        async with self._lock:
+            await self.conn.execute(
+                "UPDATE event_boards SET message_id = ?, refresh_at = ? "
+                "WHERE guild_id = ? AND channel_id = ?",
+                (message_id, float(refresh_at), guild_id, channel_id),
+            )
+            await self.conn.commit()
+
+    async def delete_event_board(self, guild_id: int, channel_id: int) -> bool:
+        async with self._lock:
+            cursor = await self.conn.execute(
+                "DELETE FROM event_boards WHERE guild_id = ? AND channel_id = ?",
+                (guild_id, channel_id),
+            )
+            await self.conn.commit()
+        return cursor.rowcount > 0
+
+    # ------------------------------------------------ event reminders (opt-in)
+
+    async def upsert_event_reminder(
+        self,
+        *,
+        guild_id: int,
+        event_id: str,
+        minutes_before: int,
+        channel_id: int,
+        created_by: int,
+        mention: str | None = None,
+        created_at: float | None = None,
+    ) -> EventReminder:
+        created = time.time() if created_at is None else created_at
+        async with self._lock:
+            await self.conn.execute(
+                """
+                INSERT INTO event_reminders
+                    (guild_id, event_id, minutes_before, channel_id, mention, created_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (guild_id, event_id) DO UPDATE SET
+                    minutes_before = excluded.minutes_before,
+                    channel_id = excluded.channel_id,
+                    mention = excluded.mention,
+                    last_fired_at = NULL
+                """,
+                (
+                    guild_id, event_id, int(minutes_before), channel_id, mention,
+                    created_by, created,
+                ),
+            )
+            await self.conn.commit()
+
+        reminder = await self.get_event_reminder(guild_id, event_id)
+        if reminder is None:  # pragma: no cover - the row was just written
+            raise RuntimeError("event reminder disappeared right after being written")
+        return reminder
+
+    async def get_event_reminder(self, guild_id: int, event_id: str) -> EventReminder | None:
+        async with self.conn.execute(
+            "SELECT * FROM event_reminders WHERE guild_id = ? AND event_id = ?",
+            (guild_id, event_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return _to_event_reminder(row) if row is not None else None
+
+    async def list_event_reminders(self, guild_id: int | None = None) -> list[EventReminder]:
+        sql = "SELECT * FROM event_reminders"
+        params: tuple[int, ...] = ()
+        if guild_id is not None:
+            sql += " WHERE guild_id = ?"
+            params = (guild_id,)
+        sql += " ORDER BY guild_id, event_id"
+        async with self.conn.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+        return [_to_event_reminder(row) for row in rows]
+
+    async def delete_event_reminder(self, guild_id: int, event_id: str) -> bool:
+        async with self._lock:
+            cursor = await self.conn.execute(
+                "DELETE FROM event_reminders WHERE guild_id = ? AND event_id = ?",
+                (guild_id, event_id),
+            )
+            await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def mark_event_reminder_fired(
+        self, guild_id: int, event_id: str, *, started_at: float
+    ) -> None:
+        """Remember which occurrence was announced, so a restart cannot repeat it."""
+        async with self._lock:
+            await self.conn.execute(
+                "UPDATE event_reminders SET last_fired_at = ? WHERE guild_id = ? AND event_id = ?",
+                (float(started_at), guild_id, event_id),
+            )
+            await self.conn.commit()
+
+
 def _to_timer(row: aiosqlite.Row) -> Timer:
     return Timer(
         id=row["id"],
@@ -292,4 +475,29 @@ def _to_guild_preset(row: aiosqlite.Row) -> GuildPreset:
         aliases=aliases,
         note=row["note"],
         created_by=row["created_by"],
+    )
+
+
+def _to_event_board(row: aiosqlite.Row) -> EventBoard:
+    return EventBoard(
+        guild_id=row["guild_id"],
+        channel_id=row["channel_id"],
+        message_id=row["message_id"],
+        hours=row["hours"],
+        refresh_at=row["refresh_at"],
+        created_by=row["created_by"],
+        created_at=row["created_at"],
+    )
+
+
+def _to_event_reminder(row: aiosqlite.Row) -> EventReminder:
+    return EventReminder(
+        guild_id=row["guild_id"],
+        event_id=row["event_id"],
+        minutes_before=row["minutes_before"],
+        channel_id=row["channel_id"],
+        mention=row["mention"],
+        last_fired_at=row["last_fired_at"],
+        created_by=row["created_by"],
+        created_at=row["created_at"],
     )

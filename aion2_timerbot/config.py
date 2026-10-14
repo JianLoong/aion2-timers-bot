@@ -6,7 +6,13 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .schedule_source import DEFAULT_SCHEDULE_URL
+
 __all__ = ["Config", "ConfigError"]
+
+# Which server clock the event schedule follows. "global-as" (Asia) is what shugo.gg's page
+# defaults to; the events it lists are the same wall-clock hours in every region.
+DEFAULT_SCHEDULE_REGION = "global-as"
 
 
 class ConfigError(Exception):
@@ -23,6 +29,21 @@ class Config:
     missed_after_seconds: float = 120.0
     max_timers_per_guild: int = 100
     log_level: str = "INFO"
+    # event schedules (the /timer board feature)
+    schedule_region: str = DEFAULT_SCHEDULE_REGION
+    schedule_url: str = DEFAULT_SCHEDULE_URL
+    schedule_ttl_hours: float = 6.0
+    schedules_file: Path | None = None
+
+    @property
+    def schedules_path(self) -> Path:
+        """Your override file: alongside the database unless SCHEDULES_FILE says otherwise."""
+        return self.schedules_file or self.db_path.parent / "schedules.json"
+
+    @property
+    def schedule_cache_path(self) -> Path:
+        """Where the last good copy of the remote schedule is kept."""
+        return self.db_path.parent / "schedule-cache.json"
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Config":
@@ -36,6 +57,7 @@ class Config:
             )
 
         presets_file = (env.get("PRESETS_FILE") or "").strip()
+        schedules_file = (env.get("SCHEDULES_FILE") or "").strip()
 
         return cls(
             token=token,
@@ -46,6 +68,10 @@ class Config:
             missed_after_seconds=_float(env, "MISSED_AFTER_SECONDS", default=120.0, minimum=0.0),
             max_timers_per_guild=_int(env, "MAX_TIMERS_PER_GUILD", default=100, minimum=1),
             log_level=(env.get("LOG_LEVEL") or "INFO").strip().upper(),
+            schedule_region=(env.get("SCHEDULE_REGION") or DEFAULT_SCHEDULE_REGION).strip(),
+            schedule_url=(env.get("SCHEDULE_URL") or DEFAULT_SCHEDULE_URL).strip(),
+            schedule_ttl_hours=_float(env, "SCHEDULE_TTL_HOURS", default=6.0, minimum=0.0),
+            schedules_file=Path(schedules_file) if schedules_file else None,
         )
 
 

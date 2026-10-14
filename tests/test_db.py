@@ -139,3 +139,114 @@ async def test_guild_preset_deletion(store):
     assert await store.delete_guild_preset(1, "BOSS") is True
     assert await store.delete_guild_preset(1, "BOSS") is False
     assert await store.list_guild_presets(1) == []
+
+
+# -------------------------------------------------------------- event boards
+
+
+async def test_event_board_round_trip(store):
+    created = await store.upsert_event_board(
+        guild_id=1, channel_id=10, hours=24, created_by=7, refresh_at=100.0, created_at=50.0
+    )
+    assert (created.guild_id, created.channel_id, created.hours) == (1, 10, 24)
+    assert created.message_id is None
+    assert (created.refresh_at, created.created_at) == (100.0, 50.0)
+
+    await store.set_event_board_message(1, 10, message_id=555, refresh_at=200.0)
+    stored = await store.get_event_board(1, 10)
+    assert stored.message_id == 555
+    assert stored.refresh_at == 200.0
+    assert stored.hours == 24  # untouched by the message update
+
+    assert await store.get_event_board(1, 11) is None
+
+
+async def test_one_board_per_channel_and_the_posted_message_survives(store):
+    await store.upsert_event_board(guild_id=1, channel_id=10, hours=24, created_by=7, created_at=50.0)
+    await store.set_event_board_message(1, 10, message_id=999, refresh_at=10.0)
+
+    again = await store.upsert_event_board(guild_id=1, channel_id=10, hours=48, created_by=8)
+
+    assert again.hours == 48
+    assert again.message_id == 999  # re-running /timer board keeps editing the same message
+    assert again.created_at == 50.0  # the original creation time is kept
+    assert len(await store.list_event_boards(1)) == 1
+
+
+async def test_due_event_boards_are_selected_by_refresh_time(store):
+    await store.upsert_event_board(guild_id=1, channel_id=10, hours=24, created_by=7, refresh_at=100.0)
+    await store.upsert_event_board(guild_id=1, channel_id=11, hours=24, created_by=7, refresh_at=500.0)
+
+    assert await store.due_event_boards(50.0) == []
+    assert [b.channel_id for b in await store.due_event_boards(200.0)] == [10]
+    assert [b.channel_id for b in await store.due_event_boards(1000.0)] == [10, 11]
+
+
+async def test_listing_and_deleting_event_boards(store):
+    await store.upsert_event_board(guild_id=1, channel_id=10, hours=24, created_by=7)
+    await store.upsert_event_board(guild_id=2, channel_id=20, hours=24, created_by=7)
+
+    assert [(b.guild_id, b.channel_id) for b in await store.list_event_boards()] == [(1, 10), (2, 20)]
+    assert [b.channel_id for b in await store.list_event_boards(2)] == [20]
+    assert await store.delete_event_board(1, 10) is True
+    assert await store.delete_event_board(1, 10) is False
+    assert len(await store.list_event_boards()) == 1
+
+
+# ----------------------------------------------------------- event reminders
+
+
+async def test_event_reminder_round_trip(store):
+    created = await store.upsert_event_reminder(
+        guild_id=1, event_id="rift", minutes_before=5, channel_id=10, created_by=7, mention="here"
+    )
+    assert (created.minutes_before, created.channel_id, created.mention) == (5, 10, "here")
+    assert created.last_fired_at is None
+
+    assert (await store.get_event_reminder(1, "rift")).event_id == "rift"
+    assert await store.get_event_reminder(2, "rift") is None
+    assert [r.event_id for r in await store.list_event_reminders(1)] == ["rift"]
+    assert [r.event_id for r in await store.list_event_reminders()] == ["rift"]
+
+
+async def test_a_reminder_is_one_per_event_and_changing_it_rearms_it(store):
+    await store.upsert_event_reminder(
+        guild_id=1, event_id="rift", minutes_before=0, channel_id=10, created_by=7
+    )
+    await store.mark_event_reminder_fired(1, "rift", started_at=1234.0)
+    assert (await store.get_event_reminder(1, "rift")).last_fired_at == 1234.0
+
+    updated = await store.upsert_event_reminder(
+        guild_id=1, event_id="rift", minutes_before=10, channel_id=11, created_by=8, mention="everyone"
+    )
+
+    assert updated.minutes_before == 10
+    assert updated.channel_id == 11
+    assert updated.mention == "everyone"
+    assert updated.last_fired_at is None  # otherwise the new setting never fires
+    assert len(await store.list_event_reminders(1)) == 1
+
+
+async def test_deleting_an_event_reminder(store):
+    await store.upsert_event_reminder(
+        guild_id=1, event_id="rift", minutes_before=5, channel_id=10, created_by=7
+    )
+    assert await store.delete_event_reminder(1, "rift") is True
+    assert await store.delete_event_reminder(1, "rift") is False
+    assert await store.list_event_reminders(1) == []
+
+
+async def test_event_tables_survive_reopening_the_database(tmp_path):
+    path = tmp_path / "persist-events.db"
+
+    async with Store(path) as first:
+        await first.upsert_event_board(guild_id=1, channel_id=10, hours=12, created_by=7)
+        await first.set_event_board_message(1, 10, message_id=42, refresh_at=99.0)
+        await first.upsert_event_reminder(
+            guild_id=1, event_id="rift", minutes_before=2, channel_id=10, created_by=7
+        )
+
+    async with Store(path) as second:
+        board = await second.get_event_board(1, 10)
+        assert (board.message_id, board.hours, board.refresh_at) == (42, 12, 99.0)
+        assert (await second.get_event_reminder(1, "rift")).minutes_before == 2

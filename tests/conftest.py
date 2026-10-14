@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import discord
@@ -12,6 +13,34 @@ from aion2_timerbot.cogs.timers import TimerCog
 from aion2_timerbot.config import Config
 from aion2_timerbot.db import Store
 from aion2_timerbot.presets import BUILTIN_PATH, load_library
+from aion2_timerbot.schedule_source import ScheduleSource
+
+# A stand-in schedule for the tests: no URL, no cache, just this file. Two events with
+# different shapes (hourly and weekly) so the board and reminders both have something to do.
+SCHEDULE_OVERRIDE: dict[str, Any] = {
+    "region": "global-as",
+    "regionLabel": "Asia",
+    "timeZone": "Asia/Seoul",
+    "events": [
+        {
+            "id": "hourly-boss",
+            "name": "Hourly Boss",
+            "icon": "🛡️",
+            "kind": "boss",
+            "durationMinutes": 15,
+            "description": "field boss every hour at :30",
+            "schedule": {"type": "hourly", "minute": 30},
+        },
+        {
+            "id": "weekly-siege",
+            "name": "Weekly Siege",
+            "icon": "🏰",
+            "kind": "abyss",
+            "durationMinutes": 30,
+            "schedule": {"type": "weekly", "days": ["wed", "sat"], "times": ["21:00"]},
+        },
+    ],
+}
 
 
 class FakeResponse:
@@ -62,13 +91,51 @@ class FakeGuild:
         return next((role for role in self.roles if role.id == role_id), None)
 
 
+class FakeMessage:
+    def __init__(self, message_id: int, channel: "FakeChannel | None" = None, *, embed=None) -> None:
+        self.id = message_id
+        self.channel = channel
+        self.sent_embed = embed
+        self.edits: list[dict[str, Any]] = []
+        self.deleted = False
+
+    @property
+    def embed(self):
+        """What the message shows now, whether it was sent with it or edited into it."""
+        return self.edits[-1]["embed"] if self.edits else self.sent_embed
+
+    async def edit(self, *, embed=None, **kwargs):
+        self.edits.append({"embed": embed})
+
+    async def delete(self):
+        self.deleted = True
+
+
 class FakeChannel:
     def __init__(self, channel_id: int = 555) -> None:
         self.id = channel_id
         self.sent: list[dict[str, Any]] = []
+        self.messages: dict[int, FakeMessage] = {}
+        self._next_message_id = 1000
 
     async def send(self, content=None, *, embed=None, allowed_mentions=None, **kwargs):
-        self.sent.append({"content": content, "embed": embed, "allowed_mentions": allowed_mentions})
+        message = FakeMessage(self._next_message_id, self, embed=embed)
+        self._next_message_id += 1
+        self.messages[message.id] = message
+        self.sent.append(
+            {
+                "content": content,
+                "embed": embed,
+                "allowed_mentions": allowed_mentions,
+                "message": message,
+            }
+        )
+        return message
+
+    async def fetch_message(self, message_id: int) -> FakeMessage:
+        if message_id not in self.messages:
+            raise discord.NotFound(FakeHTTPResponse(404, "Not Found"), "unknown message")
+        return self.messages[message_id]
 
 
 class FakeHTTPResponse:
@@ -112,11 +179,19 @@ async def bot(tmp_path):
     extension loader re-executes the module from its spec, which would leave two
     copies of every class in it and break identity checks in the tests. The loader
     path has its own test.
+
+    The schedule comes from an override file with no URL, so tests exercise the real
+    loading path without touching the network.
     """
     config = Config(token="test-token", db_path=tmp_path / "bot.db", tick_seconds=3600.0)
     instance = Store(config.db_path)
     await instance.open()
-    player = Aion2TimerBot(config, instance, load_library(BUILTIN_PATH))
+
+    override = tmp_path / "schedules.json"
+    override.write_text(json.dumps(SCHEDULE_OVERRIDE), encoding="utf-8")
+    schedules = ScheduleSource(region="global-as", url="", override_path=override)
+
+    player = Aion2TimerBot(config, instance, load_library(BUILTIN_PATH), schedules)
     await player.add_cog(TimerCog(player))
     try:
         yield player

@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from aion2_timerbot.config import Config, ConfigError
 from aion2_timerbot.db import Store
 from aion2_timerbot.presets import BUILTIN_PATH, PresetLibrary, load_library
+from aion2_timerbot.schedule_source import ScheduleSource
 
 log = logging.getLogger("aion2_timerbot")
 
@@ -31,9 +32,15 @@ def build_intents() -> discord.Intents:
 
 
 class Aion2TimerBot(commands.Bot):
-    """The bot instance: owns the store and the loaded presets."""
+    """The bot instance: owns the store, the presets and the schedule source."""
 
-    def __init__(self, config: Config, store: Store, presets: PresetLibrary) -> None:
+    def __init__(
+        self,
+        config: Config,
+        store: Store,
+        presets: PresetLibrary,
+        schedules: ScheduleSource,
+    ) -> None:
         super().__init__(
             command_prefix=commands.when_mentioned,
             intents=build_intents(),
@@ -42,6 +49,7 @@ class Aion2TimerBot(commands.Bot):
         self.config = config
         self.store = store
         self.presets = presets
+        self.schedules = schedules
 
     async def setup_hook(self) -> None:
         await self.load_extension("aion2_timerbot.cogs.timers")
@@ -71,6 +79,14 @@ async def run() -> None:
     presets = load_library(config.presets_file or BUILTIN_PATH)
     log.info("loaded %d built-in presets", len(presets.presets))
 
+    schedules = ScheduleSource(
+        region=config.schedule_region,
+        url=config.schedule_url,
+        cache_path=config.schedule_cache_path,
+        override_path=config.schedules_path,
+        ttl_seconds=config.schedule_ttl_hours * 3600.0,
+    )
+
     store = Store(config.db_path)
     try:
         await store.open()
@@ -84,7 +100,17 @@ async def run() -> None:
         ) from exc
     log.info("timers are stored in %s", store.path)
 
-    bot = Aion2TimerBot(config, store, presets)
+    # Load the event schedule now, so a bad URL or override file shows up in the log at
+    # startup rather than the first time somebody asks for the board.
+    schedule = await schedules.get()
+    log.info(
+        "loaded %d scheduled events for %s (%s)",
+        len(schedule.events), schedule.region.label, schedule.region.time_zone,
+    )
+    if schedules.problem:
+        log.warning("schedule problem: %s", schedules.problem)
+
+    bot = Aion2TimerBot(config, store, presets, schedules)
     try:
         await bot.start(config.token)
     finally:

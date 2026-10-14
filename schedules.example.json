@@ -1,0 +1,53 @@
+{
+  "_readme": [
+    "Optional overrides for the event schedule that /timer board shows.",
+    "Copy this file to data/schedules.json (next to timers.db) and edit it there.",
+    "An entry with an existing id patches that event; a new id adds one;",
+    "\"remove\": true takes an event off the board.",
+    "",
+    "For a single region the short \"schedule\" key is easiest - it always follows the",
+    "region the bot is set up for (SCHEDULE_REGION, default global-as). Use the",
+    "\"schedules\": { \"<region>\": ... } form only when you need to name a region.",
+    "",
+    "The times below are EXAMPLES. Check them against your own server: the upstream",
+    "schedule is community data, and NCSOFT never published the Global event times."
+  ],
+  "region": "global-as",
+  "regionLabel": "Asia",
+  "timeZone": "Asia/Seoul",
+
+  "events": [
+    {
+      "_comment": "Patch an event that comes from the fetched schedule.",
+      "id": "rift",
+      "schedules": {
+        "global-as": {
+          "type": "daily",
+          "times": ["02:00", "05:00", "08:00", "11:00", "14:00", "17:00", "20:00", "23:00"]
+        }
+      }
+    },
+    {
+      "_comment": "The resets are one instant worldwide, so they name their own timezone.",
+      "id": "daily-reset",
+      "schedules": {
+        "global-as": { "type": "daily", "times": ["16:00"], "timeZone": "Asia/Seoul" }
+      }
+    },
+    {
+      "_comment": "Add an event the public schedule does not know about.",
+      "id": "ancient-boss",
+      "name": "Ancient Boss",
+      "icon": "🐲",
+      "kind": "boss",
+      "description": "Our server's own boss timer.",
+      "durationMinutes": 30,
+      "schedule": { "type": "weekly", "days": ["fri"], "times": ["22:00"] }
+    },
+    {
+      "_comment": "Hide an event you do not care about.",
+      "id": "dimensional-invasion",
+      "remove": true
+    }
+  ]
+}
