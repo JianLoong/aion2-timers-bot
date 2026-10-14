@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import discord
 
 import bot as bot_module
@@ -50,7 +52,25 @@ def test_a_rejected_token_is_reported_without_a_traceback(monkeypatch, tmp_path,
 
 
 def test_an_unwritable_database_path_is_reported(monkeypatch, tmp_path, capsys):
-    """A bad DB_PATH or a read-only volume should not look like a crash."""
+    """A bad DB_PATH, or a volume the bot's uid cannot write, must not look like a crash."""
+
+    async def denied(self):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    _prepare(monkeypatch, tmp_path, "not-a-real-token")
+    monkeypatch.setattr(Store, "open", denied)
+
+    assert bot_module.main() == 2
+
+    stderr = capsys.readouterr().err
+    assert "database" in stderr
+    assert "timers.db" in stderr
+    assert "Traceback" not in stderr
+    assert "Event loop is closed" not in stderr
+
+
+def test_a_folder_that_cannot_be_made_is_reported(monkeypatch, tmp_path, capsys):
+    """The other half: mkdir fails, which arrives as an OSError instead."""
 
     async def denied(self):
         raise PermissionError(13, "Permission denied")

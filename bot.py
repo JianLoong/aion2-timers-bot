@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import sys
 
 import discord
@@ -73,10 +74,13 @@ async def run() -> None:
     store = Store(config.db_path)
     try:
         await store.open()
-    except OSError as exc:
+    except (OSError, sqlite3.Error) as exc:
+        # sqlite3 reports an unwritable folder as OperationalError ("unable to open database
+        # file"), which is not an OSError, so both have to be caught to explain it properly.
         raise ConfigError(
-            f"Could not open the timer database at {store.path}: {exc}. Check DB_PATH and that "
-            "the folder it points at exists and is writable."
+            f"Could not open the timer database at {store.path}: {exc}. Make sure that folder "
+            "exists and is writable by the user running the bot — in Docker that is uid 1000, "
+            "so a root-owned ./data needs `chown -R 1000:1000 data` on the host."
         ) from exc
     log.info("timers are stored in %s", store.path)
 
