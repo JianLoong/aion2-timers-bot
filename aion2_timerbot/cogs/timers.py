@@ -988,6 +988,29 @@ class TimerCog(commands.Cog):
             embed.set_footer(text=f"⚠️ {self.source.problem}"[:2048])
         return embed
 
+    def _explain_channel_value(self, error: app_commands.TransformerError) -> str:
+        """Explain a channel value Discord would not hand over.
+
+        The picker offers every channel, but resolving one needs it in my cache, and a channel
+        I have no View Channel permission for is not there — that is the usual cause.
+        """
+        value = error.value
+        channel_id = getattr(value, "id", None)
+        name = getattr(value, "name", None)
+        label = f"**#{name}**" if name else f"`{channel_id if channel_id is not None else value}`"
+        known = self.bot.get_channel(channel_id) if isinstance(channel_id, int) else None
+
+        if known is None:
+            return (
+                f"I cannot see {label} at all, so I cannot post there. Give me "
+                "**View Channel** and **Send Messages** in that channel (or in its category), "
+                "then try again."
+            )
+        return (
+            f"I cannot post in {label} — it is {_channel_kind(known)}. Pick a text, "
+            "announcement, voice or stage channel."
+        )
+
     @staticmethod
     def _unknown_event(schedule: Schedule, name: str) -> str:
         known = schedule.names()
@@ -1070,11 +1093,7 @@ class TimerCog(commands.Cog):
         if isinstance(error, UserError):
             message = str(error)
         elif isinstance(error, app_commands.TransformerError):
-            # Carries the raw value and the transformer, not a parameter, so no field name here.
-            message = (
-                "Discord would not hand me that value. Pick a channel I can post in — text, "
-                "announcement, voice and stage channels all work."
-            )
+            message = self._explain_channel_value(error)
         elif isinstance(error, app_commands.MissingPermissions):
             message = "You do not have permission to do that."
         elif isinstance(error, app_commands.NoPrivateMessage):
@@ -1131,6 +1150,15 @@ def _mention_label(mention: str) -> str:
 
 def _minutes_phrase(minutes: int) -> str:
     return "when it starts" if not minutes else f"{minutes} min before"
+
+
+def _channel_kind(channel) -> str:
+    """Describe a channel that cannot hold a board, in words worth reading."""
+    if isinstance(channel, discord.CategoryChannel):
+        return "a category, which groups channels rather than holding messages"
+    if isinstance(channel, discord.ForumChannel):
+        return "a forum, which wants posts rather than one message"
+    return "a kind of channel I cannot post in"
 
 
 def _board_line(row: EventOccurrences) -> str:

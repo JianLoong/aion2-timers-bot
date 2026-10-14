@@ -708,6 +708,51 @@ async def test_a_channel_discord_cannot_hand_over_is_explained(bot):
     assert "Something went wrong" not in message
 
 
+class _ChannelValue:
+    """What Discord hands over for a channel option: id, name and type, no object."""
+
+    def __init__(self, channel_id: int, name: str, kind: discord.ChannelType) -> None:
+        self.id = channel_id
+        self.name = name
+        self.type = kind
+
+
+def _transformer_error(bot, value):
+    param = _command(bot.tree, "timer", "board")._params["channel"]
+    return app_commands.TransformerError(
+        value, discord.AppCommandOptionType.channel, param._annotation
+    )
+
+
+async def test_a_channel_i_cannot_see_is_diagnosed(bot, monkeypatch):
+    """The usual cause: Discord offers every channel, but an invisible one is not in my cache."""
+    cog = _cog(bot)
+    interaction = FakeInteraction()
+    monkeypatch.setattr(bot, "get_channel", lambda channel_id: None)
+    value = _ChannelValue(4242, "officers", discord.ChannelType.text)
+
+    await cog.cog_app_command_error(interaction, _transformer_error(bot, value))
+
+    message = interaction.response.last["content"]
+    assert "#officers" in message
+    assert "View Channel" in message
+
+
+async def test_a_channel_it_cannot_post_in_is_diagnosed(bot, monkeypatch):
+    """A category is visible but can never hold a message."""
+    cog = _cog(bot)
+    interaction = FakeInteraction()
+    category = object.__new__(discord.CategoryChannel)  # isinstance without building a guild
+    monkeypatch.setattr(bot, "get_channel", lambda channel_id: category)
+    value = _ChannelValue(4242, "General", discord.ChannelType.category)
+
+    await cog.cog_app_command_error(interaction, _transformer_error(bot, value))
+
+    message = interaction.response.last["content"]
+    assert "#General" in message
+    assert "category" in message
+
+
 async def test_board_reports_a_channel_it_cannot_post_in(bot, monkeypatch):
     cog = _cog(bot)
     monkeypatch.setattr(bot, "get_channel", lambda channel_id: None)
