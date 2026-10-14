@@ -1,0 +1,52 @@
+{
+  "_readme": [
+    "Starter presets for /timer preset.",
+    "The intervals below are EXAMPLES, not official Aion 2 spawn data - edit them to match",
+    "your server's schedule, or add your own with /timer preset add in Discord.",
+    "Fields: name (required), interval (required, e.g. '4h'), category, aliases, note."
+  ],
+  "presets": [
+    {
+      "name": "World Boss",
+      "category": "Open world",
+      "interval": "4h",
+      "aliases": ["wb"],
+      "note": "Example interval - change it to your server's world boss respawn window."
+    },
+    {
+      "name": "Field Boss",
+      "category": "Open world",
+      "interval": "1h",
+      "aliases": ["fb"],
+      "note": "Example interval - change it to your server's field boss respawn."
+    },
+    {
+      "name": "Rift",
+      "category": "Open world",
+      "interval": "2h",
+      "aliases": [],
+      "note": "Example interval - change it to your server's rift schedule."
+    },
+    {
+      "name": "Siege",
+      "category": "PvP",
+      "interval": "3d",
+      "aliases": ["fortress"],
+      "note": "Example interval - change it to your server's siege schedule."
+    },
+    {
+      "name": "Daily Reset",
+      "category": "Reset",
+      "interval": "1d",
+      "aliases": ["daily"],
+      "note": "Daily reset. Set it once and it repeats every day."
+    },
+    {
+      "name": "Weekly Reset",
+      "category": "Reset",
+      "interval": "7d",
+      "aliases": ["weekly"],
+      "note": "Weekly reset. Set it once and it repeats every week."
+    }
+  ]
+}

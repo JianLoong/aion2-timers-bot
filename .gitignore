@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+data/*.db
+data/*.db-journal
+*.db
+*.db-journal
+.docker*
+.reasonix*

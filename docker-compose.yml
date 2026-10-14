@@ -1,0 +1,19 @@
+# Starts the timer bot. Create .env first — see "Start the bot" in README.md.
+#
+#   docker compose up -d --build     start (or rebuild after changing code)
+#   docker compose logs -f           watch it
+#   docker compose down              stop
+services:
+  bot:
+    build: .
+    image: aion2-timerbot:latest
+    container_name: aion2-timerbot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Pin the database inside the container so timers always land on the mounted
+      # volume, whatever DB_PATH says in your .env.
+      DB_PATH: /app/data/timers.db
+    volumes:
+      # Your timers live in ./data/timers.db and survive down/rebuild.
+      - ./data:/app/data
