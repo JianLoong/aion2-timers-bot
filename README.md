@@ -21,8 +21,16 @@ Do this once.
 *New Application* → *Bot* → *Reset Token* → copy. Nothing to toggle in the portal: the bot
 enables only the plain GUILDS intent, which is not a privileged one.
 
-**2. Invite it to your server** with the `bot` and `applications.commands` scopes.
-`applications.commands` is the scope that makes `/timer` show up.
+**2. Invite it to your server.** Use this bot's own invite link — it requests the `bot` and
+`applications.commands` scopes (the second is what makes `/timer` show up) plus just the
+permissions alerts need (view channel, send messages, embed links, mention everyone):
+
+```
+https://discord.com/oauth2/authorize?client_id=1559913484907585606&scope=bot+applications.commands&permissions=150528
+```
+
+If you ever recreate the application, build a new link from the new application ID. A bot in
+zero servers logs in fine but has nowhere to work, so this step is the one that makes it usable.
 
 **3. Put the token in a `.env` file** next to `bot.py`:
 
@@ -84,6 +92,9 @@ the code, run `docker compose up -d --build` again.
 token and the same `data/timers.db`: you would have two bots answering Discord and two
 processes writing one SQLite file. Stop the local one with Ctrl-C, or `docker compose down`,
 before switching.
+
+If the log says `unable to open database file`, the mounted `./data` is not writable by the
+container's user. Run it as root instead: `DOCKER_USER=0:0 docker compose up -d`.
 
 ## Commands
 

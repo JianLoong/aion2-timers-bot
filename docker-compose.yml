@@ -10,6 +10,11 @@ services:
     container_name: aion2-timerbot
     restart: unless-stopped
     env_file: .env
+    # The image runs as uid 1000. If the mounted ./data is not writable by that user
+    # (Windows ACLs, or a volume created by root), the log says
+    # "unable to open database file" — start it as root instead:
+    #   DOCKER_USER=0:0 docker compose up -d
+    user: "${DOCKER_USER:-1000:1000}"
     environment:
       # Pin the database inside the container so timers always land on the mounted
       # volume, whatever DB_PATH says in your .env.
