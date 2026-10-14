@@ -34,6 +34,13 @@ DONE_COLOUR = discord.Colour(0xF2B33D)
 
 _USAGE_NAME = "Use `/timer set`, or start a preset with `/timer preset start`."
 
+# Any guild channel that can hold a message. Discord's default "#general" is often a VOICE
+# channel, so demanding a text channel rejects the obvious place to put a board. Announcement
+# channels are `TextChannel` in discord.py, so they are already covered.
+MessageableChannel = (
+    discord.TextChannel | discord.VoiceChannel | discord.StageChannel | discord.Thread
+)
+
 # A reminder is still worth sending this long after its ideal moment (restart, slow tick).
 REMINDER_GRACE = 120.0
 # A board refreshes when its earliest listed event starts, but never less often than this...
@@ -199,7 +206,7 @@ class TimerCog(commands.Cog):
         repeat: bool = False,
         note: str | None = None,
         ping: str | None = None,
-        channel: discord.TextChannel | None = None,
+        channel: MessageableChannel | None = None,
         replace: bool = False,
     ) -> None:
         timer = await self._create_timer(
@@ -269,7 +276,7 @@ class TimerCog(commands.Cog):
         repeat: bool = True,
         note: str | None = None,
         ping: str | None = None,
-        channel: discord.TextChannel | None = None,
+        channel: MessageableChannel | None = None,
         replace: bool = False,
     ) -> None:
         timer = await self._start_preset(
@@ -366,7 +373,7 @@ class TimerCog(commands.Cog):
     async def timer_board(
         self,
         interaction: discord.Interaction,
-        channel: discord.TextChannel | None = None,
+        channel: MessageableChannel | None = None,
         hours: Literal[12, 24, 48] = 24,
         remove: bool = False,
     ) -> None:
@@ -418,7 +425,7 @@ class TimerCog(commands.Cog):
         interaction: discord.Interaction,
         event: str,
         minutes: Literal[0, 2, 5, 10, 15] = 5,
-        channel: discord.TextChannel | None = None,
+        channel: MessageableChannel | None = None,
         ping: str | None = None,
     ) -> None:
         guild = self._require_guild(interaction)
@@ -1062,6 +1069,12 @@ class TimerCog(commands.Cog):
 
         if isinstance(error, UserError):
             message = str(error)
+        elif isinstance(error, app_commands.TransformerError):
+            # Carries the raw value and the transformer, not a parameter, so no field name here.
+            message = (
+                "Discord would not hand me that value. Pick a channel I can post in — text, "
+                "announcement, voice and stage channels all work."
+            )
         elif isinstance(error, app_commands.MissingPermissions):
             message = "You do not have permission to do that."
         elif isinstance(error, app_commands.NoPrivateMessage):

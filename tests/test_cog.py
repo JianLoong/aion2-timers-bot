@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
+from typing import get_args, get_type_hints
 from zoneinfo import ZoneInfo
 
 import discord
@@ -595,6 +596,24 @@ async def test_missing_permissions_are_explained(bot):
 
 # ------------------------------------------------------------- /timer board
 
+def test_channel_options_accept_any_channel_that_can_hold_a_message():
+    """Regression: Discord's default "#general" is often a VOICE channel.
+
+    A TextChannel-only option made Discord reject it before our code ever ran:
+    "Failed to convert general to TextChannel".
+    """
+    for name in ("timer_set", "timer_board", "preset_start", "reminder_set"):
+        command = TimerCog.__dict__[name]
+        allowed = get_args(get_type_hints(command.callback)["channel"])
+        for expected in (
+            discord.TextChannel,
+            discord.VoiceChannel,
+            discord.StageChannel,
+            discord.Thread,
+        ):
+            assert expected in allowed, f"/timer {name} would refuse a {expected.__name__}"
+
+
 KST = ZoneInfo("Asia/Seoul")
 
 
@@ -647,6 +666,20 @@ async def test_board_posts_a_live_embed(bot, monkeypatch):
     assert interaction.response.last["ephemeral"] is True
 
 
+async def test_the_board_option_offers_voice_channels_to_discord(bot):
+    """What Discord is told to offer in the picker — the payload, not just the annotation."""
+    options = _command(bot.tree, "timer", "board").to_dict(bot.tree)["options"]
+    option = next(entry for entry in options if entry["name"] == "channel")
+
+    assert option["type"] == discord.AppCommandOptionType.channel.value
+    offered = set(option["channel_types"])
+    assert {
+        discord.ChannelType.text.value,
+        discord.ChannelType.voice.value,
+        discord.ChannelType.stage_voice.value,
+    } <= offered
+
+
 async def test_board_needs_manage_channels(bot):
     cog = _cog(bot)
     interaction = FakeInteraction()
@@ -655,6 +688,24 @@ async def test_board_needs_manage_channels(bot):
 
     assert "Manage Channels" in message
     assert await cog.store.list_event_boards(interaction.guild.id) == []
+
+
+async def test_a_channel_discord_cannot_hand_over_is_explained(bot):
+    """If Discord refuses a value, say so in words instead of "something went wrong"."""
+    cog = _cog(bot)
+    interaction = FakeInteraction()
+    param = _command(bot.tree, "timer", "board")._params["channel"]
+
+    await cog.cog_app_command_error(
+        interaction,
+        app_commands.TransformerError(
+            "general", discord.AppCommandOptionType.channel, param._annotation
+        ),
+    )
+
+    message = interaction.response.last["content"]
+    assert "channel" in message.lower()
+    assert "Something went wrong" not in message
 
 
 async def test_board_reports_a_channel_it_cannot_post_in(bot, monkeypatch):
