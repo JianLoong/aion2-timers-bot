@@ -11,6 +11,7 @@ world bosses, rifts, sieges, daily and weekly resets.
   timer is one command instead of typing a duration
 - `/timer board` — a live "next up" board of the scheduled events (rifts, invasions, sieges,
   bosses, resets), with countdowns rendered in each member's own timezone
+- `/timer events` — the same schedule as a private reply, needing no channel permissions at all
 - `/timer reminder set|off|list` — an opt-in warning a few minutes before an event starts
 
 Timers live in a SQLite file, so they survive restarts. A timer that was due while the bot
@@ -26,8 +27,19 @@ enables only the plain GUILDS intent, which is not a privileged one.
 
 **2. Invite it to your server.** In your application's *OAuth2 → URL Generator*, tick the `bot`
 and `applications.commands` scopes — the second is what makes `/timer` show up — and give it
-view channel, send messages, embed links and mention everyone. A bot in zero servers logs in
-fine but has nowhere to work, so this step is what makes it usable.
+**View Channels**, **Send Messages**, **Embed Links**, **Read Message History** (the board
+re-reads its own message to keep editing it) and **Mention @everyone** if you want that ping to
+work. A bot in zero servers logs in fine but has nowhere to work, so this step is what makes it
+usable.
+
+If a command answers *"I cannot see #channel at all"*, that channel's own permissions are
+overriding the invite: right-click the channel → **Edit Channel** → **Permissions** → add the
+bot's role (named after the bot, e.g. `aion2-timers`) → allow **View Channel** and **Send
+Messages**. Doing that on the channel's *category* covers everything under it, and **Server
+Settings → Roles → the bot's role** sets it server-wide. This trips people up in a default
+server because `#general` is a voice channel, and a voice channel's text chat is invisible
+without View Channel on it. If you only want to *read* the schedule, none of this matters —
+`/timer events` answers privately and posts nothing.
 
 **3. Put the token in a `.env` file** next to `bot.py`:
 
@@ -137,6 +149,13 @@ Posts one message and keeps editing it: the next few times of every scheduled ev
 first, using Discord relative timestamps that count down for each reader. It re-renders itself
 as events pass and the window rolls forward, so it never goes stale. `hours` is 12, 24
 (default) or 48; `remove:True` deletes the board and its message.
+
+### `/timer events [hours] [event]`
+
+The schedule without touching a channel: an ephemeral reply listing the upcoming events, or, with
+`event`, one event in full — its rule ("every hour at :30"), how long it runs and its next few
+times. Nothing is posted and no permission is needed, so this is the one to use if you just want
+to read the times, or if the bot cannot post where you want the board.
 
 ### `/timer reminder set event [minutes] [channel] [ping]`, `/timer reminder off event`, `/timer reminder list` (Manage Channels)
 

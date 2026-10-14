@@ -69,6 +69,7 @@ async def test_commands_are_registered_under_timer(bot):
         ("timer",),
         ("timer", "set"),
         ("timer", "list"),
+        ("timer", "events"),
         ("timer", "cancel"),
         ("timer", "preset"),
         ("timer", "preset", "list"),
@@ -87,9 +88,11 @@ async def test_autocomplete_is_wired_to_the_right_options(bot):
     set_command = _command(bot.tree, "timer", "set")
     cancel = _command(bot.tree, "timer", "cancel")
     start = _command(bot.tree, "timer", "preset", "start")
+    events = _command(bot.tree, "timer", "events")
 
     assert cancel._params["name"].autocomplete is not None
     assert start._params["preset"].autocomplete is not None
+    assert events._params["event"].autocomplete is not None
     assert set_command._params["name"].autocomplete is None
 
 
@@ -867,6 +870,64 @@ async def test_a_board_whose_channel_vanished_is_backed_off(bot, monkeypatch):
 
     board = await cog.store.get_event_board(interaction.guild.id, 999)
     assert board.refresh_at > time.time()  # retried later, not every tick
+
+
+# ---------------------------------------------------------- /timer events
+
+
+async def test_events_lists_the_schedule_for_a_plain_member(bot):
+    """The whole point: reading the schedule needs no channel or server permissions."""
+    cog = _cog(bot)
+    interaction = FakeInteraction()  # no permissions at all
+
+    await _invoke(cog, "timer_events", interaction)
+
+    answer = interaction.response.last
+    assert answer["ephemeral"] is True
+    assert "Hourly Boss" in answer["embed"].description
+    assert "Weekly Siege" in answer["embed"].description
+    assert "<t:" in answer["embed"].description  # live countdowns
+
+
+async def test_events_honours_the_horizon(bot):
+    cog = _cog(bot)
+    interaction = FakeInteraction()
+
+    await _invoke(cog, "timer_events", interaction, hours=12)
+
+    assert "next 12h" in interaction.response.last["embed"].title
+
+
+async def test_events_can_show_one_event_in_full(bot):
+    cog = _cog(bot)
+    interaction = FakeInteraction()
+
+    await _invoke(cog, "timer_events", interaction, event="Hourly Boss")
+
+    fields = {field.name: field.value for field in interaction.response.last["embed"].fields}
+    assert "every hour at :30" in fields["Repeats"]
+    assert "15m" in fields["Length"]
+    assert "field boss every hour at :30" in fields["About"]
+    assert fields["Next up"].count("<t:") >= 4  # each of the next few, absolute and relative
+
+
+async def test_events_names_the_events_it_knows(bot):
+    cog = _cog(bot)
+    interaction = FakeInteraction()
+
+    message = await _expect_user_error(cog, interaction, "timer_events", event="Ancient Dragon")
+
+    assert "Hourly Boss" in message
+
+
+async def test_events_posts_nothing_and_stores_nothing(bot):
+    cog = _cog(bot)
+    interaction = FakeInteraction()
+
+    await _invoke(cog, "timer_events", interaction)
+
+    assert interaction.channel.sent == []
+    assert await cog.store.list_event_boards(interaction.guild.id) == []
 
 
 # ---------------------------------------------------------- /timer reminder

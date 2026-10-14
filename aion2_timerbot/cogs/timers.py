@@ -412,6 +412,33 @@ class TimerCog(commands.Cog):
             ephemeral=True,
         )
 
+    @timer_group.command(name="events", description="Show the upcoming scheduled events.")
+    @app_commands.describe(
+        hours="How far ahead to list. Defaults to 24.",
+        event="Only this event. Defaults to all of them.",
+    )
+    @app_commands.autocomplete(event=schedule_event_autocomplete)
+    async def timer_events(
+        self,
+        interaction: discord.Interaction,
+        hours: Literal[12, 24, 48] = 24,
+        event: str | None = None,
+    ) -> None:
+        """Read-only, and ephemeral: no channel permissions needed to use it."""
+        self._require_guild(interaction)
+        schedule = await self.source.get()
+        now = time.time()
+
+        if event is None:
+            embed, _ = self._board_embed(schedule, float(hours), now=now)
+        else:
+            found = schedule.find(event)
+            if found is None:
+                raise UserError(self._unknown_event(schedule, event))
+            embed = self._event_embed(schedule, found, now=now)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @reminder_group.command(name="set", description="Get warned before a scheduled event starts.")
     @app_commands.describe(
         event="Which scheduled event.",
@@ -899,6 +926,48 @@ class TimerCog(commands.Cog):
         starts = [occurrence.start for row in rows for occurrence in row.occurrences]
         refresh_at = min(starts) + 5.0 if starts else now + BOARD_REFRESH_FLOOR
         return embed, min(refresh_at, now + BOARD_REFRESH_CAP)
+
+    def _event_embed(self, schedule: Schedule, event, *, now: float) -> discord.Embed:
+        """One event in full: its rule, how long it runs, and its next few times."""
+        icon = f"{event.icon} " if event.icon else ""
+        embed = discord.Embed(title=f"{icon}{event.name}", colour=TIMER_COLOUR)
+
+        spec = event.spec_for(schedule.region.id)
+        if spec is not None:
+            zone = schedule.zone_for(event)
+            stamp = datetime.fromtimestamp(now, tz=zone).tzname() or zone.key
+            embed.add_field(
+                name="Repeats", value=f"{event.describe_rule(spec)} ({stamp})", inline=False
+            )
+
+        details = []
+        if event.duration_minutes:
+            details.append(f"runs about {format_timedelta(_seconds(event.duration_minutes * 60))}")
+        if event.portal_minutes:
+            details.append(f"enter within the first {event.portal_minutes} min")
+        if details:
+            embed.add_field(name="Length", value=" · ".join(details), inline=False)
+        if event.description:
+            embed.add_field(name="About", value=event.description[:300], inline=False)
+
+        occurrences = schedule.next_occurrences(event, now=now, count=5)
+        if occurrences:
+            embed.add_field(
+                name="Next up",
+                value="\n".join(
+                    f"{discord.utils.format_dt(_dt(occurrence.start), 'f')} — "
+                    f"{discord.utils.format_dt(_dt(occurrence.start), 'R')}"
+                    + (f" `{occurrence.label}`" if occurrence.label else "")
+                    for occurrence in occurrences
+                )[:1024],
+                inline=False,
+            )
+        else:
+            embed.add_field(name="Next up", value="Nothing scheduled that I know of.", inline=False)
+
+        if self.source.problem:
+            embed.set_footer(text=f"⚠️ {self.source.problem}"[:2048])
+        return embed
 
     async def _fire_reminders(self, now: float) -> None:
         reminders = await self.store.list_event_reminders()
